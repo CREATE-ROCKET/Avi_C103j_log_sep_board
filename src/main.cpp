@@ -1,4 +1,5 @@
 #include <arduino.h>
+#include <CANCREATE.h>
 #include <ICM42688.h>
 #include <LPS25HB.h>
 #include <SPIflash.h>
@@ -6,9 +7,8 @@
 
 #define SPIFREQ 5000000 // 1200000とどっちにするのか
 
-u_int8_t tx[256]; // 1ページ分
-u_int8_t rx[256]; // 2ページ分
-
+#define CAN_RX 47
+#define CAN_TX 48
 #define SCK 17
 #define MISO 16
 #define MOSI 18
@@ -21,9 +21,13 @@ u_int8_t rx[256]; // 2ページ分
 #define LPS25HB_WHO_AM_I 0xBD // LPS25HBの固有ID (10進数で189)
 
 SPICREATE::SPICreate SPIC;
+CAN_CREATE CAN(true);
 ICM icm42688;
 LPS lps;
 Flash flash;
+
+u_int8_t tx[256]; // 1ページ分
+u_int8_t rx[256]; // 2ページ分
 
 hw_timer_t *timer = NULL;
 u_int8_t LPS_temp[3] = {0, 0, 0};
@@ -33,8 +37,10 @@ volatile int16_t ICM_data[6];
 
 spi_host_device_t host_in = SPI2_HOST;
 
-char CAN_cmd;
-char Serial_cmd;
+can_return_t can_data;
+u_int32_t can_id;
+char can_cmd;
+char Serial_cmd = -1;
 u_int32_t start_time = 0;
 u_int32_t log_time = 0;
 u_int32_t flash_time = 0;
@@ -56,7 +62,6 @@ volatile int r_count = 0;
 volatile int l_count = 0;
 volatile int LED_count = 0;
 volatile int kaisan_count = 0;
-u_int32_t can_id = 0;
 u_int32_t lps_now = 0;
 int16_t ax = 0;
 int16_t ay = 0;
@@ -79,6 +84,7 @@ volatile bool erase_flag = false;
 bool log_flag = false;
 volatile bool tikatika_now = false;
 
+void exec_can(u_int32_t, char, int);
 void standby();
 void raw_data();
 void log_data();
@@ -205,6 +211,15 @@ void setup()
 
   SPIC.begin(SPI2_HOST, SCK, MISO, MOSI);
 
+  if (CAN.begin(100E3, CAN_RX, CAN_TX, 10))
+  {
+    Serial.println("CAN failed");
+  }
+  else
+  {
+    Serial.println("CAN succeeded !!!!");
+  }
+
   icm42688.begin(&SPIC, ICMCS, SPIFREQ);
   // Flashの初期化 この前にSPIの初期化を行う必要がある
   flash.begin(&SPIC, FlashCS, SPIFREQ);
@@ -229,76 +244,35 @@ int j = 0;
 
 void loop()
 {
-  if (Serial.available() > 0)
+  if (Serial.available())
   {
     Serial_cmd = Serial.read();
+    Serial.print("Serial cmd :");
     Serial.println(Serial_cmd);
-    if (Serial_cmd == 's' || (CAN_cmd == 's' && can_id == 0x005))
+    exec_can(0, 0, Serial_cmd);
+  }
+  if (CAN.available())
+  {
+    if (CAN.readWithDetail(&can_data))
     {
-      digitalWrite(led_pin, HIGH);
-      tikatika_now = true;
-      log_flag = true;
-      erase_flag = false;
-      check = false;
-      i = 0;
-      j = 0;
-
-      risyou_flag = false;
-      risyou_siriaru = false;
-
-      kaisan_flag = false;
-      kaisan_siriaru = false;
-      kaisan_timer = 0;
-      kaisan_count = 0;
-
-      lps_sample_count1 = 0;
-      icm_sample_count = 0;
-      lps_sample_count2 = 0;
-      lps_risyou_count = 0;
-      icm_risyou_count = 0;
-      lps_kaisan_count = 0;
-      lps_risyou_sum = 0;
-      lps_kaisan_sum = 0;
-      lps_risyou_before = 0;
-      avg_ax = 0;
-      avg_ay = 0;
-      avg_az = 0;
-      lps_kaisan_before = 0;
-      start_time = millis();
-      standby_flag = true;
+      Serial.println("CAN failed");
     }
-    if (Serial_cmd == 'e' || (CAN_cmd == 'e' && can_id == 0x00a))
+    else
     {
-      standby_flag = false;
-      log_flag = false;
-    }
-
-    if (Serial_cmd == 'p' || (CAN_cmd == 'p' && can_id == 0x00d))
-    {
-      kaisan_count = 0;
-      kaisan_timer = 0;
-      kaisan_siriaru = false;
-      kaisan_flag = true;
-    }
-    if (Serial_cmd == 'r' || (CAN_cmd == 'r' && can_id == 0x00d))
-    {
-      kaisan_flag = false;
-    }
-
-    if (Serial_cmd == 'l' || (CAN_cmd == 'l' && can_id == 0x011))
-    {
-      erase_flag = false;
-      check = false;
-      i = 0;
-      j = 0;
-      start_time = millis();
-      log_flag = true;
-    }
-    if (Serial_cmd == 'm' || (CAN_cmd == 'm' && can_id == 0x01e))
-    {
-      log_flag = false;
+      if (can_data.size > 0)
+      {
+        can_id = can_data.id;
+        can_cmd = can_data.data[0];
+        Serial.print("can id :");
+        Serial.print(can_id, HEX);
+        Serial.print(", ");
+        Serial.print("can cmd :");
+        Serial.println(can_cmd);
+        exec_can(can_id, can_cmd, 0);
+      }
     }
   }
+
   if (standby_flag == true)
   {
     standby();
@@ -310,6 +284,74 @@ void loop()
       log_data();
       l_count = 0;
     }
+  }
+}
+void exec_can(u_int32_t can_id, char can_cmd, int Serial_cmd)
+{
+  if ((can_id == 0x005 && can_cmd == 's') || Serial_cmd == 's')
+  {
+    digitalWrite(led_pin, HIGH);
+    tikatika_now = true;
+    log_flag = true;
+    erase_flag = false;
+    check = false;
+    i = 0;
+    j = 0;
+
+    risyou_flag = false;
+    risyou_siriaru = false;
+
+    kaisan_flag = false;
+    kaisan_siriaru = false;
+    kaisan_timer = 0;
+    kaisan_count = 0;
+
+    lps_sample_count1 = 0;
+    icm_sample_count = 0;
+    lps_sample_count2 = 0;
+    lps_risyou_count = 0;
+    icm_risyou_count = 0;
+    lps_kaisan_count = 0;
+    lps_risyou_sum = 0;
+    lps_kaisan_sum = 0;
+    lps_risyou_before = 0;
+    avg_ax = 0;
+    avg_ay = 0;
+    avg_az = 0;
+    lps_kaisan_before = 0;
+    start_time = millis();
+    standby_flag = true;
+  }
+  if ((can_id == 0x00a && can_cmd == 'e') || Serial_cmd == 'e')
+  {
+    standby_flag = false;
+    log_flag = false;
+  }
+
+  if ((can_id == 0x00d && can_cmd == 'p') || Serial_cmd == 'p')
+  {
+    kaisan_count = 0;
+    kaisan_timer = 0;
+    kaisan_siriaru = false;
+    kaisan_flag = true;
+  }
+  if ((can_id == 0x00d && can_cmd == 'r') || Serial_cmd == 'r')
+  {
+    kaisan_flag = false;
+  }
+
+  if ((can_id == 0x011 && can_cmd == 'l') || Serial_cmd == 'l')
+  {
+    erase_flag = false;
+    check = false;
+    i = 0;
+    j = 0;
+    start_time = millis();
+    log_flag = true;
+  }
+  if ((can_id == 0x01e && can_cmd == 'm') || Serial_cmd == 'm')
+  {
+    log_flag = false;
   }
 }
 void standby()
@@ -326,7 +368,7 @@ void standby()
     risyou_siriaru = true;
     delay(500);
   }
-  if (kaisan_timer >= 14000)
+  if (kaisan_timer >= 15000)
   {
     kaisan_flag = true;
     kaisan_timer = 0;
@@ -351,7 +393,7 @@ void standby()
 }
 void raw_data()
 {
-  Serial.print("生データ"); //ただし遅延アリ、データは同時のもの
+  Serial.print("生データ"); // ただし遅延アリ、データは同時のもの
   Serial.print(log_time);
   Serial.print(", ");
   Serial.print(lps_now);
@@ -365,14 +407,21 @@ void raw_data()
 
 void log_data()
 {
-  log_time = millis() - start_time;
+  if (!erase_flag)
+  {
+    Serial.println("start erase...");
+    flash.erase();
+    Serial.println("erase DONE!!!");
+    erase_flag = true;
+  }
+    log_time = millis() - start_time;
   lps.Get(LPS_temp);
   noInterrupts();
   LPS25_data[0] = LPS_temp[0];
   LPS25_data[1] = LPS_temp[1];
   LPS25_data[2] = LPS_temp[2];
   interrupts();
-  
+
   lps_now = (LPS25_data[0] + LPS25_data[1] * 256 + LPS25_data[2] * 65536) * 200 / 4096;
 
   icm42688.Get(ICM_temp);
@@ -381,13 +430,6 @@ void log_data()
   ICM_data[1] = ICM_temp[1];
   ICM_data[2] = ICM_temp[2];
   interrupts();
-  if (!erase_flag)
-  {
-    Serial.println("start erase...");
-    flash.erase();
-    Serial.println("erase DONE!!!");
-    erase_flag = true;
-  }
   if (!check)
   {
     tx[i] = log_time >> 16;
@@ -458,7 +500,7 @@ void update_LED()
   }
   if (risyou_flag && kaisan_flag)
   {
-    digitalWrite(led_pin, HIGH);
+    digitalWrite(led_pin, LOW);
     tikatika_now = true;
   }
 }
