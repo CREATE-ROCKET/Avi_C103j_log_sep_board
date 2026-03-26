@@ -61,6 +61,10 @@ int icm_risyou_sum = 0;
 int avg_ax = 0;
 int avg_ay = 0;
 int avg_az = 0;
+int32_t mx = 0;
+int32_t my = 0;
+int32_t mz = 0;
+
 volatile int r_count = 0;
 volatile int l_count = 0;
 volatile int LED_count = 0;
@@ -87,7 +91,8 @@ int lps_kaisan_before = 0;
 volatile bool risyou_flag = false;
 volatile bool kaisan_flag = false;
 volatile bool Serial_risyou = false;
-volatile int kaisan_timer = 0;
+volatile int kaisan_timer_1 = 0;
+volatile int kaisan_timer_2 = 0;
 volatile bool Serial_kaisan = false;
 bool flash_risyou_write_flag = false;
 bool flash_kaisan_write_flag = false;
@@ -113,10 +118,10 @@ IRAM_ATTR void counter()
     lps_risyou_raw = ((LPS25_data[0] + LPS25_data[1] * 256 + LPS25_data[2] * 65536) * 200) / 4096; // ヘクトパスカル*200の値が格納されています
     lps_risyou_sum += lps_risyou_raw;
     lps_sample_count1++;
-    if (lps_sample_count1 == 20) // 40→5に変更
+    if (lps_sample_count1 == 5) // 40→5に変更
     {
       lps_sample_count1 = 0;
-      if ((lps_risyou_before - lps_risyou_sum / 20) >= 2) // ここを変える テストのときは4 本番は20⇐今回は0.1hPa=20だから合ってる 前回と今回が逆になっていたので調整
+      if ((lps_risyou_before - lps_risyou_sum / 5) >= 20) // ここを変える テストのときは4 本番は20⇐今回は0.1hPa=20だから合ってる 前回と今回が逆になっていたので調整
       {
         lps_risyou_count++;
         if (lps_risyou_count == 5)
@@ -129,7 +134,7 @@ IRAM_ATTR void counter()
       {
         lps_risyou_count = 0;
       }
-      lps_risyou_before = lps_risyou_sum / 20;
+      lps_risyou_before = lps_risyou_sum / 5;
       lps_risyou_sum = 0;
     }
   }
@@ -137,16 +142,20 @@ IRAM_ATTR void counter()
   if (tick % 1 == 0) // 本番は60→1
   {
     icm_sample_count++;
-    avg_ax += ICM_data[0] / 20;
-    avg_ay += ICM_data[1] / 20;
-    avg_az += ICM_data[2] / 20;
+    avg_ax += ICM_data[0];
+    avg_ay += ICM_data[1];
+    avg_az += ICM_data[2];
+
     if (icm_sample_count == 20)
     {
-      icm_risyou_sum = sqrt(avg_ax * avg_ax + avg_ay * avg_ay + avg_az * avg_az) * 16 / 32768;
-      if (icm_risyou_sum >= 2) // 本番は4
+      mx = avg_ax / 20;
+      my = avg_ay / 20;
+      mz = avg_az / 20;
+      icm_risyou_sum = (mx * 16 / 32768) * (mx * 16 / 32768) + (my * 16 / 32768) * (my * 16 / 32768) + (mz * 16 / 32768) * (mz * 16 / 32768);
+      if (icm_risyou_sum >= 4) // 本番は4
       {
         icm_risyou_count++;
-        if (icm_risyou_count == 10) // ここを変える テストのときは2 本番は50
+        if (icm_risyou_count == 50) // ここを変える テストのときは2 本番は50
         {
           risyou_flag = true;
           // risyoudetect();//離床検知
@@ -164,15 +173,15 @@ IRAM_ATTR void counter()
     }
   }
 
-  if (tick % 20 == 0)
+  if ((tick % 40 == 0) && (kaisan_timer_1 >= 10000))
   {
     lps_kaisan_raw = ((LPS25_data[0] + LPS25_data[1] * 256 + LPS25_data[2] * 65536) * 200) / 4096; // ヘクトパスカル*200の値が格納されています
     lps_kaisan_sum += lps_kaisan_raw;
-    lps_sample_count2++;         // 生データ
-    if (lps_sample_count2 == 10) // 5(10にした)回の平均(40になっていたので変更)
+    lps_sample_count2++;        // 生データ
+    if (lps_sample_count2 == 5) // 5(10にした)回の平均(40になっていたので変更)
     {
       lps_sample_count2 = 0;
-      if (lps_kaisan_sum / 10 > lps_kaisan_before)
+      if (lps_kaisan_sum / 5 > lps_kaisan_before)
       {
         lps_kaisan_count++;
         if (lps_kaisan_count == 5) // ここを変える テストのときは4 本番は5
@@ -185,13 +194,14 @@ IRAM_ATTR void counter()
       {
         lps_kaisan_count = 0;
       }
-      lps_kaisan_before = lps_kaisan_sum / 10;
+      lps_kaisan_before = lps_kaisan_sum / 5;
       lps_kaisan_sum = 0;
     }
   }
   if (risyou_flag && !kaisan_flag)
   {
-    kaisan_timer++;
+    kaisan_timer_1++;
+    kaisan_timer_2++;
   }
   r_count++;
   l_count++;
@@ -239,10 +249,6 @@ void setup()
   lps.begin(&SPIC, LPSCS, SPIFREQ);
 
   delay(3000);
-  // Serial.println("start erase...");
-  // flash.erase();
-  // Serial.println("erase DONE!!!");
-  // erase_flag = true;
 
   // タイマー割り込み
   timer = timerBegin(0, getApbFrequency() / 1000000, true);
@@ -250,7 +256,8 @@ void setup()
   timerAlarmWrite(timer, 1000, true);
   timerAlarmEnable(timer);
 
-  for(int n = 241;n < 256;n ++){
+  for (int n = 241; n < 256; n++)
+  {
     tx[n] = 0;
   }
 }
@@ -320,11 +327,13 @@ void exec_can(u_int32_t can_id, char can_cmd, int Serial_cmd)
     flash_risyou_write_flag = false;
     flash_kaisan_write_flag = false;
 
-    for(int n = 0;n < 256 ;n++){
-     tx[n] = 0; 
+    for (int n = 0; n < 256; n++)
+    {
+      tx[n] = 0;
     }
 
-    kaisan_timer = 0;
+    kaisan_timer_1 = 0;
+    kaisan_timer_2 = 0;
     kaisan_count = 0;
 
     lps_sample_count1 = 0;
@@ -349,18 +358,47 @@ void exec_can(u_int32_t can_id, char can_cmd, int Serial_cmd)
     log_flag = false;
   }
 
-  if ((can_id == 0x00d && can_cmd == 'p') || Serial_cmd == 'p')
-  {
-    kaisan_count = 0;
-    kaisan_timer = 0;
-    Serial_kaisan = false;
-    kaisan_flag = true;
-  }
   if ((can_id == 0x003 && can_cmd == 'a') || Serial_cmd == 'a')
   {
-    kaisan_flag = false;
-  }
+    digitalWrite(led_pin, HIGH);
+    tikatika_now = true;
+    erase_flag = false;
+    check = false;
+    i = 0;
 
+    risyou_flag = false;
+    Serial_risyou = false;
+    kaisan_flag = false;
+    Serial_kaisan = false;
+
+    flash_risyou_read_flag = false;
+    flash_kaisan_read_flag = false;
+    flash_risyou_write_flag = false;
+    flash_kaisan_write_flag = false;
+
+    for (int n = 0; n < 256; n++)
+    {
+      tx[n] = 0;
+    }
+
+    kaisan_timer_1 = 0;
+    kaisan_timer_2 = 0;
+    kaisan_count = 0;
+
+    lps_sample_count1 = 0;
+    icm_sample_count = 0;
+    lps_sample_count2 = 0;
+    lps_risyou_count = 0;
+    icm_risyou_count = 0;
+    lps_kaisan_count = 0;
+    lps_risyou_sum = 0;
+    lps_kaisan_sum = 0;
+    lps_risyou_before = 0;
+    avg_ax = 0;
+    avg_ay = 0;
+    avg_az = 0;
+    lps_kaisan_before = 0;
+  }
   if ((can_id == 0x011 && can_cmd == 'l') || Serial_cmd == 'l')
   {
     erase_flag = false;
@@ -381,7 +419,8 @@ void exec_can(u_int32_t can_id, char can_cmd, int Serial_cmd)
     i = 0;
     j = 0;
     check = false;
-    for(int n = 0;n < 256;n++){
+    for (int n = 0; n < 256; n++)
+    {
       tx[n] = 0;
     }
     flash_risyou_read_flag = false;
@@ -412,10 +451,10 @@ void standby()
 
     delay(500);
   }
-  if (kaisan_timer >= 15000)
+  if (kaisan_timer_2 >= 15000)
   {
     kaisan_flag = true;
-    kaisan_timer = 0;
+    kaisan_timer_2 = 0;
   }
   if (!Serial_kaisan && kaisan_flag)
   {
@@ -527,41 +566,42 @@ void log_data()
     CAN.sendData(0x11a, can_icm_1, 6);
     CAN.sendData(0x120, can_icm_2, 6);
 
-    // Serial.print("CAN ICMデータ :");
-    // Serial.print(can_icm[0]);
-    // Serial.print(", ");
-    // Serial.print(can_icm[1]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[2]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[3]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[4]),
-    // Serial.print(", ");
-    // Serial.println(can_icm[5]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[0]);
-    // Serial.print(", ");
-    // Serial.print(can_icm[1]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[2]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[3]),
-    // Serial.print(", ");
-    // Serial.print(can_icm[4]),
-    // Serial.print(", ");
-    // Serial.println(can_icm[5]),
+    Serial.print("CAN ICMデータ :");
+    Serial.print(can_icm_1[0]);
+    Serial.print(", ");
+    Serial.print(can_icm_1[1]);
+    Serial.print(", ");
+    Serial.print(can_icm_1[2]);
+    Serial.print(", ");
+    Serial.print(can_icm_1[3]);
+    Serial.print(", ");
+    Serial.print(can_icm_1[4]);
+    Serial.print(", ");
+    Serial.print(can_icm_1[5]);
+    Serial.print(", ");
+    Serial.print("CAN ICMデータ");
+    Serial.print(can_icm_2[0]);
+    Serial.print(", ");
+    Serial.print(can_icm_2[1]);
+    Serial.print(", ");
+    Serial.print(can_icm_2[2]);
+    Serial.print(", ");
+    Serial.print(can_icm_2[3]);
+    Serial.print(", ");
+    Serial.print(can_icm_2[4]);
+    Serial.print(", ");
+    Serial.println(can_icm_2[5]);
 
     can_lps[0] = LPS25_data[0];
     can_lps[1] = LPS25_data[1];
     can_lps[2] = LPS25_data[2];
     CAN.sendData(0x10a, can_lps, 3);
-    // Serial.print("CAN LPSデータ");
-    // Serial.print(can_lps[0]);
-    // Serial.print(", ");
-    // Serial.print(can_lps[1]);
-    // Serial.print(", ");
-    // Serial.println(can_lps[2]);
+    Serial.print("CAN LPSデータ");
+    Serial.print(can_lps[0]);
+    Serial.print(", ");
+    Serial.print(can_lps[1]);
+    Serial.print(", ");
+    Serial.println(can_lps[2]);
 
     delay(10);
     if (i == 240)
@@ -611,10 +651,6 @@ void log_data()
         {
           Serial.println("flash:kaisan");
         }
-      }
-      if (j == 5 * 256) // 今は書き込みが5ページ分になっている
-      {
-        check = true;
       }
     }
   }
